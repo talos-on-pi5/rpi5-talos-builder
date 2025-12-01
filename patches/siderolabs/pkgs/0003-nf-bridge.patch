@@ -1,0 +1,13 @@
+diff --git a/kernel/build/config-arm64 b/kernel/build/config-arm64
+index 9b215b0..6518d59 100644
+--- a/kernel/build/config-arm64
++++ b/kernel/build/config-arm64
+@@ -1633,7 +1633,7 @@ CONFIG_IP6_NF_NAT=y
+ # end of IPv6: Netfilter Configuration
+ 
+ CONFIG_NF_DEFRAG_IPV6=y
+-# CONFIG_NF_TABLES_BRIDGE is not set
++CONFIG_NF_TABLES_BRIDGE=y
+ # CONFIG_NF_CONNTRACK_BRIDGE is not set
+ CONFIG_BRIDGE_NF_EBTABLES_LEGACY=y
+ CONFIG_BRIDGE_NF_EBTABLES=y
