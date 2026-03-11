@@ -1,13 +1,24 @@
 PKG_VERSION = v1.11.0
-TALOS_VERSION = v1.11.5
+TALOS_VERSION ?= v1.11.5
 SBCOVERLAY_VERSION = main
 
+PUSH ?= true
 REGISTRY ?= ghcr.io
-REGISTRY_USERNAME ?= talos-rpi5
 
+ifndef RPI_MODEL
+RPI_MODEL = rpi5
+endif
+REGISTRY_USERNAME ?= talos-$(RPI_MODEL)
 TAG ?= $(shell git describe --tags --exact-match)
 
-EXTENSIONS ?= ghcr.io/siderolabs/gvisor:20250505.0@sha256:d7503b59603f030b972ceb29e5e86979e6c889be1596e87642291fee48ce380c
+SED ?= sed
+ASSET_TYPE ?= installer
+CONFIG_TXT = dtparam=i2c_arm=on
+
+EXTENSIONS ?=
+EXTENSION_ARGS = $(foreach ext,$(EXTENSIONS),--system-extension-image $(ext))
+
+SBCOVERLAY_PI4_IMAGE ?= ghcr.io/siderolabs/sbc-raspberrypi:v0.1.5
 
 PKG_REPOSITORY = https://github.com/siderolabs/pkgs.git
 TALOS_REPOSITORY = https://github.com/siderolabs/talos.git
@@ -25,15 +36,20 @@ SBCOVERLAY_TAG = $(shell cd $(CHECKOUTS_DIRECTORY)/sbc-raspberrypi5 && git descr
 #
 .PHONY: help
 help:
-	@echo "checkouts : Clone repositories required for the build"
-	@echo "patches   : Apply all patches"
-	@echo "kernel    : Build kernel"
-	@echo "overlay   : Build Raspberry Pi 5 overlay"
-	@echo "installer : Build installer docker image and disk image"
-	@echo "release   : Use only when building the final release, this will tag relevant images with the current Git tag."
-	@echo "clean     : Clean up any remains"
-
-
+	@echo "checkouts      : Clone repositories required for the build"
+	@echo "patches-pi5    : Apply all patches for Raspberry Pi 5"
+	@echo "patches-pi4    : Apply all patches for Raspberry Pi 4"
+	@echo "kernel         : Build kernel"
+	@echo "overlay        : Build Raspberry Pi 5 overlay"
+	@echo "imager         : Build imager docker image"
+	@echo "installer-base : Build installer-base docker image"
+	@echo "kern_initramfs : Build kernel and initramfs"
+	@echo "installer-pi5  : Build installer/image for Raspberry Pi 5"
+	@echo "installer-pi4  : Build installer/image for Raspberry Pi 4"
+	@echo "pi5            : Full build pipeline for Raspberry Pi 5"
+	@echo "pi4            : Full build pipeline for Raspberry Pi 4"
+	@echo "release        : Use only when building the final release, this will tag relevant images with the current Git tag."
+	@echo "clean          : Clean up any remains"
 
 #
 # Checkouts
@@ -49,23 +65,30 @@ checkouts-clean:
 	rm -rf "$(CHECKOUTS_DIRECTORY)/talos"
 	rm -rf "$(CHECKOUTS_DIRECTORY)/sbc-raspberrypi5"
 
-
-
 #
 # Patches
 #
-.PHONY: patches-pkgs patches-talos patches
+.PHONY: patches-pkgs patches-talos patches patches-pkgs-4 patches-pi4 patches-pi5
 patches-pkgs:
 	cd "$(CHECKOUTS_DIRECTORY)/pkgs" && \
 		git am "$(PATCHES_DIRECTORY)/siderolabs/pkgs/0001-Patched-for-Raspberry-Pi-5.patch"
+	cd "$(CHECKOUTS_DIRECTORY)/pkgs" && \
+		git apply $(PATCHES_DIRECTORY)/siderolabs/pkgs/0003-nf-bridge.patch
 
 patches-talos:
 	cd "$(CHECKOUTS_DIRECTORY)/talos" && \
 		git am "$(PATCHES_DIRECTORY)/siderolabs/talos/0001-Patched-for-Raspberry-Pi-5.patch"
 
-patches: patches-pkgs patches-talos
+patches-pi5: patches-pkgs patches-talos
 
+patches-pkgs-4:
+	cd "$(CHECKOUTS_DIRECTORY)/pkgs" && \
+		git apply "$(PATCHES_DIRECTORY)/siderolabs/pkgs/0002-Patched-for-Raspberry-Pi-4.patch"
 
+patches-pi4: patches-pkgs patches-pkgs-4 patches-talos
+
+# Backwards-compatible alias
+patches: patches-pi5
 
 #
 # Kernel
@@ -74,11 +97,9 @@ patches: patches-pkgs patches-talos
 kernel:
 	cd "$(CHECKOUTS_DIRECTORY)/pkgs" && \
 		$(MAKE) \
-			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) PUSH=true \
+			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) PUSH=$(PUSH) \
 			PLATFORM=linux/arm64 \
 			kernel
-
-
 
 #
 # Overlay
@@ -88,34 +109,67 @@ overlay:
 	@echo SBCOVERLAY_TAG = $(SBCOVERLAY_TAG)
 	cd "$(CHECKOUTS_DIRECTORY)/sbc-raspberrypi5" && \
 		$(MAKE) \
-			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) IMAGE_TAG=$(SBCOVERLAY_TAG) PUSH=true \
+			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) IMAGE_TAG=$(SBCOVERLAY_TAG) PUSH=$(PUSH) \
 			PKGS_PREFIX=$(REGISTRY)/$(REGISTRY_USERNAME) PKGS=$(PKGS_TAG) \
 			INSTALLER_ARCH=arm64 PLATFORM=linux/arm64 \
 			sbc-raspberrypi5
 
+.PHONY: imager
+imager:
+	cd "$(CHECKOUTS_DIRECTORY)/talos" && \
+		$(MAKE) \
+			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) PUSH=$(PUSH) \
+			PKG_KERNEL=$(REGISTRY)/$(REGISTRY_USERNAME)/kernel:$(PKGS_TAG) \
+			INSTALLER_ARCH=arm64 PLATFORM=linux/arm64 SED=$(SED) \
+			imager
 
+.PHONY: installer-base
+installer-base:
+	cd "$(CHECKOUTS_DIRECTORY)/talos" && \
+		$(MAKE) \
+			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) PUSH=$(PUSH) \
+			PKG_KERNEL=$(REGISTRY)/$(REGISTRY_USERNAME)/kernel:$(PKGS_TAG) \
+			INSTALLER_ARCH=arm64 PLATFORM=linux/arm64 SED=$(SED) \
+			installer-base
+
+.PHONY: kern_initramfs
+kern_initramfs:
+	cd "$(CHECKOUTS_DIRECTORY)/talos" && \
+		$(MAKE) \
+			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) PUSH=$(PUSH) \
+			PKG_KERNEL=$(REGISTRY)/$(REGISTRY_USERNAME)/kernel:$(PKGS_TAG) \
+			INSTALLER_ARCH=arm64 PLATFORM=linux/arm64 SED=$(SED) \
+			kernel initramfs
 
 #
 # Installer/Image
 #
-.PHONY: installer
-installer:
+.PHONY: installer-pi5
+installer-pi5:
 	cd "$(CHECKOUTS_DIRECTORY)/talos" && \
-		$(MAKE) \
-			REGISTRY=$(REGISTRY) USERNAME=$(REGISTRY_USERNAME) PUSH=true \
-			PKG_KERNEL=$(REGISTRY)/$(REGISTRY_USERNAME)/kernel:$(PKGS_TAG) \
-			INSTALLER_ARCH=arm64 PLATFORM=linux/arm64 \
-			IMAGER_ARGS="--overlay-name=rpi5 --overlay-image=$(REGISTRY)/$(REGISTRY_USERNAME)/sbc-raspberrypi5:$(SBCOVERLAY_TAG) --system-extension-image=$(EXTENSIONS)" \
-			kernel initramfs imager installer-base installer && \
 		docker \
 			run --rm -t -v ./_out:/out -v /dev:/dev --privileged $(REGISTRY)/$(REGISTRY_USERNAME)/imager:$(TALOS_TAG) \
-			metal --arch arm64 \
-			--base-installer-image="$(REGISTRY)/$(REGISTRY_USERNAME)/installer:$(TALOS_TAG)" \
+			$(ASSET_TYPE) --arch arm64 \
+			--base-installer-image="$(REGISTRY)/$(REGISTRY_USERNAME)/installer-base:$(TALOS_TAG)" \
 			--overlay-name="rpi5" \
 			--overlay-image="$(REGISTRY)/$(REGISTRY_USERNAME)/sbc-raspberrypi5:$(SBCOVERLAY_TAG)" \
-			--system-extension-image="$(EXTENSIONS)"
+			$(EXTENSION_ARGS)
 
+.PHONY: installer-pi4
+installer-pi4:
+	cd "$(CHECKOUTS_DIRECTORY)/talos" && \
+		docker \
+			run --rm -t -v ./_out:/out -v /dev:/dev --privileged $(REGISTRY)/$(REGISTRY_USERNAME)/imager:$(TALOS_TAG) \
+			$(ASSET_TYPE) --arch arm64 \
+			--base-installer-image="$(REGISTRY)/$(REGISTRY_USERNAME)/installer-base:$(TALOS_TAG)" \
+			--overlay-name="rpi_generic" \
+			--overlay-image="$(SBCOVERLAY_PI4_IMAGE)" \
+			--overlay-option="configTxtAppend=$(CONFIG_TXT)" \
+			$(EXTENSION_ARGS)
 
+# Backwards-compatible alias
+.PHONY: installer
+installer: installer-pi5
 
 #
 # Release
@@ -126,7 +180,11 @@ release:
 		docker tag $(REGISTRY)/$(REGISTRY_USERNAME)/installer:$(TALOS_TAG) $(REGISTRY)/$(REGISTRY_USERNAME)/installer:$(TAG) && \
 		docker push $(REGISTRY)/$(REGISTRY_USERNAME)/installer:$(TAG)
 
+.PHONY: pi5
+pi5: checkouts-clean checkouts patches-pi5 kernel kern_initramfs installer-base imager overlay installer-pi5
 
+.PHONY: pi4
+pi4: checkouts-clean checkouts patches-pi4 kernel kern_initramfs installer-base imager installer-pi4
 
 #
 # Clean
